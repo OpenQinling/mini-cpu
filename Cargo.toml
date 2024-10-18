@@ -1,0 +1,10 @@
+[package]
+name = "mini-cpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+smallvec = "1.13.2"
+terl = { path = "../Pin1Yin1-Compiler-Rust/terl", features = [
+    "parser_calling_tree",
+] }

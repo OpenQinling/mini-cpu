@@ -1,0 +1,47 @@
+PC = 0x00
+D1 = 0x02
+D2 = 0x04
+D3 = 0x06
+D4 = 0x08
+CP = 0x0A
+SP = 0x0C
+LR = 0x0E
+
+SET SP 0x10
+
+
+NOT A =
+	MOV A D1
+	SET A 0xFFFF
+	SUB A D1
+
+MOV A B =
+	STR A CP
+	LOD B CP
+
+NEQ A B =
+	SUB A B
+
+JNE COND TO =
+	SET D1 4
+	ADD COND D1
+	ADD PC COND
+	MOV TO PC
+
+PUSH X =
+	SET D1 2
+	ADD D1 SP
+	STR X  SP
+	MOV D1 SP
+
+POP X =
+	SET D1 2
+	SUB SP D1
+	LOD X SP
+
+SET D4 102
+Print D4 0
+PUSH D4
+POP D4
+
+SET PC 0xffff
