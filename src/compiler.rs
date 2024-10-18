@@ -20,6 +20,12 @@ struct MacroCall {
     args: Vec<macros::Meta>,
 }
 
+impl MacroCall {
+    fn call(&self, memory: &mut crate::Memory) -> Result<(), terl::Error> {
+        self.called.call(memory, &self.args)
+    }
+}
+
 #[derive(Debug)]
 enum Command {
     Command(crate::Command),
@@ -41,17 +47,19 @@ impl From<MacroCall> for Command {
 #[derive(Debug, Default)]
 pub struct Compiler {
     // for defines
-    defines: HashMap<Arc<String>, Ident>,
+    defines: HashMap<Arc<String>, crate::Value>,
     // for function
-    args: HashMap<Arc<String>, Ident>,
+    args: HashMap<Arc<String>, crate::Value>,
     functions: HashMap<Arc<String>, Arc<Function>>,
 
     commands: Vec<Command>,
 }
 
 impl Compiler {
-    pub fn compile_define(&mut self, define: parser::Define) {
-        self.defines.insert(define.name.0, define.value);
+    pub fn compile_define(&mut self, define: parser::Define) -> Result<(), terl::Error> {
+        let value = self.parse_value(&define.value)?;
+        self.defines.insert(define.name.0, value);
+        Ok(())
     }
 
     pub fn compile_function(&mut self, function: parser::Function) -> Result<(), terl::Error> {
@@ -72,18 +80,17 @@ impl Compiler {
         Ok(())
     }
 
-    pub fn true_name<'a>(&'a self, value: &'a Ident) -> &'a Ident {
+    pub fn parse_value<'a>(&'a self, value: &'a Ident) -> Result<crate::Value, terl::Error> {
         self.args
             .get(value.deref())
             .or_else(|| self.defines.get(value.deref()))
-            .unwrap_or(value)
-    }
-
-    pub fn parse_value(&self, ident: &parser::Ident) -> Result<crate::Value, terl::Error> {
-        let true_name = self.true_name(ident);
-        true_name
-            .parse::<crate::Value>()
-            .map_err(|e| ident.make_error(e))
+            .copied()
+            .map(Ok)
+            .unwrap_or_else(|| value.parse::<crate::Value>())
+            .map_err(|e| {
+                let reason = format!("{}: {value}", e);
+                value.make_error(reason)
+            })
     }
 
     pub fn compile_command(&mut self, command: &parser::Command) -> Result<(), terl::Error> {
@@ -107,25 +114,37 @@ impl Compiler {
                 self.commands
                     .push(crate::Command::new(builtin.parse().unwrap(), a, b).into());
             }
-            custom => {
-                let fn_called = self.true_name(&command.called);
-                if let Some(function) = self.functions.get(fn_called.deref()).cloned() {
+            _custom => {
+                let fn_called = &command.called;
+                if let Some(function) = self.functions.get(command.called.deref()).cloned() {
                     if function.args.len() != command.args.len() {
                         let reason = format!(
                             "function {} requires {} arguments",
-                            custom,
+                            fn_called.as_str(),
                             function.args.len()
                         );
                         return Err(args_span.make_error(reason));
                     }
 
+                    let mut conflict = HashMap::new();
+
                     for (arg, value) in function.args.iter().zip(command.args.iter()) {
-                        let value = self.true_name(value).to_owned();
-                        self.args.insert(arg.deref().clone(), value);
+                        let value = self.parse_value(value).to_owned()?;
+                        if let Some(conf) = self.args.insert(arg.deref().clone(), value) {
+                            conflict.insert(arg.deref().clone(), conf);
+                        }
                     }
 
                     for command in &function.body {
                         self.compile_command(command)?;
+                    }
+
+                    for arg in &function.args {
+                        self.args.remove(arg.deref());
+                    }
+
+                    for (arg, value) in conflict {
+                        self.args.insert(arg, value);
                     }
                 } else {
                     let undefined = format!("undefined function {}", fn_called.as_str());
@@ -148,7 +167,6 @@ impl Compiler {
             .iter()
             .map(|arg| macros::Meta {
                 id: arg.to_owned(),
-                tn: self.true_name(arg).to_owned(),
                 val: self.parse_value(arg).ok(),
             })
             .collect();
@@ -164,7 +182,7 @@ impl Compiler {
 
     pub fn compile_item(&mut self, item: parser::Item) -> Result<(), terl::Error> {
         match item {
-            parser::Item::Define(define) => self.compile_define(define),
+            parser::Item::Define(define) => self.compile_define(define)?,
             parser::Item::Function(function) => self.compile_function(function)?,
             parser::Item::Command(command) => self.compile_command(&command)?,
             parser::Item::MacroCall(macto_call) => self.compile_macro_call(macto_call)?,
@@ -179,7 +197,35 @@ impl Compiler {
         })
     }
 
-    pub fn run(&self, mut pc: crate::Value, memory: &mut crate::Memory) {
-        // 1. load command from internal memory
+    pub fn run(&mut self, pc_val: crate::Value, memory: &mut crate::Memory) {
+        let mut macros = HashMap::new();
+        self.commands
+            .iter_mut()
+            .fold(pc_val, |pc_val, command| match command {
+                Command::Command(c) => {
+                    c.encode(&mut memory[pc_val.0 as usize..]);
+                    pc_val.next_command().unwrap()
+                }
+                Command::MacroCall(m) => {
+                    macros.entry(pc_val).or_insert_with(Vec::new).push(m);
+                    pc_val
+                }
+            });
+
+        let mut pc_val = pc_val;
+        loop {
+            memory.write(0x00.into(), pc_val);
+            if let Some(macros) = macros.get(&pc_val) {
+                for m in macros {
+                    m.call(memory).unwrap();
+                }
+            }
+            if memory.eval(0x00.into()).is_err() {
+                println!("Aborted");
+                break;
+            }
+
+            pc_val = pc_val.next_command().unwrap();
+        }
     }
 }

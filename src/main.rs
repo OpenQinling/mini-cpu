@@ -1,12 +1,3 @@
-// 16bit
-// 2bit
-
-// ADD A B -> A = A + B
-// SUB A B -> A = A - B
-// SET A B -> A = B
-// CPY A B -> B = A
-// LOD A B -> A = memory[B]
-
 mod compiler;
 mod macros;
 mod parser;
@@ -19,10 +10,10 @@ use std::{
 
 #[derive(Debug, Clone, Copy)]
 enum Op {
-    Add,
+    Unknow1,
     Sub,
     Set,
-    Cpy,
+    Unknow2,
     Lod,
     Str,
 }
@@ -30,34 +21,41 @@ enum Op {
 impl Op {
     fn execute(&self, mem: &mut Memory, a: Value, b: Value) {
         match self {
-            Op::Add => {
-                let tmp = mem.read(a);
-                let (result, _) = tmp.0.overflowing_add(mem.read(b).0);
-                mem.write(a, result.into());
+            // *a += *b
+            Op::Unknow1 => {
+                unreachable!("Unknow1");
             }
+            // *a -= *b
             Op::Sub => {
                 let tmp = mem.read(a);
                 let (result, _) = tmp.0.overflowing_sub(mem.read(b).0);
                 mem.write(a, result.into());
             }
+            // *a = b
             Op::Set => {
                 mem.write(a, b);
             }
-            Op::Cpy => {
-                let a = mem.read(a);
-                mem.write(b, a);
+
+            // *b = *a
+            Op::Unknow2 => {
+                unreachable!()
             }
+            // *a = **b
             Op::Lod => {
                 let ptr = mem.read(b);
                 let data = mem.read(ptr);
                 mem.write(a, data);
             }
+            // **b = *a
             Op::Str => {
                 let data = mem.read(a);
                 let ptr = mem.read(b);
+
                 mem.write(ptr, data);
             }
         }
+        // *c = a
+        // b = *c
     }
 }
 
@@ -69,10 +67,10 @@ impl FromStr for Op {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "ADD" => Ok(Op::Add),
+            // "Unknow1" => Ok(Op::Unknow1),
             "SUB" => Ok(Op::Sub),
             "SET" => Ok(Op::Set),
-            "CPY" => Ok(Op::Cpy),
+            // "Unknow2" => Ok(Op::Unknow2),
             "LOD" => Ok(Op::Lod),
             "STR" => Ok(Op::Str),
             _ => Err(InvalidOp),
@@ -85,12 +83,12 @@ impl TryFrom<u8> for Op {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(Op::Add),
-            1 => Ok(Op::Sub),
-            2 => Ok(Op::Set),
-            3 => Ok(Op::Cpy),
-            4 => Ok(Op::Lod),
-            5 => Ok(Op::Str),
+            1 => Ok(Op::Unknow1),
+            2 => Ok(Op::Sub),
+            3 => Ok(Op::Set),
+            4 => Ok(Op::Unknow2),
+            5 => Ok(Op::Lod),
+            6 => Ok(Op::Str),
             _ => Err(InvalidOp),
         }
     }
@@ -99,12 +97,12 @@ impl TryFrom<u8> for Op {
 impl From<Op> for u8 {
     fn from(value: Op) -> Self {
         match value {
-            Op::Add => 0,
-            Op::Sub => 1,
-            Op::Set => 2,
-            Op::Cpy => 3,
-            Op::Lod => 4,
-            Op::Str => 5,
+            Op::Unknow1 => 1,
+            Op::Sub => 2,
+            Op::Set => 3,
+            Op::Unknow2 => 4,
+            Op::Lod => 5,
+            Op::Str => 6,
         }
     }
 }
@@ -157,8 +155,7 @@ where
     E: Encode,
     I: Iterator<Item = E>,
 {
-    fn encode(&mut self, memory: &mut [u8]) {
-        let mut memory = memory;
+    fn encode(&mut self, mut memory: &mut [u8]) {
         for mut command in self {
             command.encode(&mut memory[..5]);
             memory = &mut memory[5..];
@@ -176,9 +173,9 @@ impl Memory<'_> {
     }
 
     fn eval(&mut self, pc: Value) -> Result<(), InvalidOp> {
-        let pc = self.read(pc);
-        let command = Command::decode(&self.memory[pc.0 as usize..])?;
-        println!("eval: {command:?}");
+        let pc_val = self.read(pc);
+        let command = Command::decode(&self.memory[pc_val.0 as usize..])?;
+        println!("eval: {command:?} at {}", pc_val.0);
         command.execute(self);
         Ok(())
     }
@@ -216,7 +213,7 @@ impl DerefMut for Memory<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Value(u16);
 
 impl core::fmt::Display for Value {
@@ -225,6 +222,7 @@ impl core::fmt::Display for Value {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 struct Aborted;
 
 impl Value {
@@ -303,19 +301,22 @@ fn main() {
             .unwrap();
     }
 
-    let pc = Value::new(0xf000);
-    let pc_at = Value::new(0xf000);
-    memory.write(pc, pc_at);
-    compiler.commands().encode(&mut memory[*pc as usize..]);
+    // let pc = Value::new(0x0000);
+    // let pc_val = Value::new(0xf000);
+    // memory.write(pc, pc_val);
+    // compiler.commands().encode(&mut memory[*pc_val as usize..]);
 
-    // normal mode: real
-    loop {
-        memory.eval(pc).unwrap();
-        if let Ok(next) = memory.read(pc).next_command() {
-            memory.write(pc, next);
-        } else {
-            println!("aborted");
-            break;
-        }
-    }
+    // // normal mode: real
+    // loop {
+    //     if memory.eval(pc).is_err() {
+    //         println!("aborted");
+    //         break;
+    //     }
+    //     println!("pc: {}", memory.read(pc).0);
+    //     if let Ok(next) = memory.read(pc).next_command() {
+    //         memory.write(pc, next);
+    //     }
+    // }
+
+    compiler.run(Value::new(0xf000), &mut memory);
 }

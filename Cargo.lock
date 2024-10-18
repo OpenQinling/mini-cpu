@@ -35,6 +35,8 @@ checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
 [[package]]
 name = "terl"
 version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c861e013a52b58a9a597d31308b285370e6ed0017fea6bc5f7b85ea29573ada"
 dependencies = [
  "colored",
 ]

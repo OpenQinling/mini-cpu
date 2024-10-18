@@ -5,7 +5,6 @@ use crate::{parser::Ident, Memory, Value};
 #[derive(Debug)]
 pub struct Meta {
     pub id: Ident,
-    pub tn: Ident,
     pub val: Option<Value>,
 }
 
@@ -18,8 +17,11 @@ impl Macro {
     }
 }
 
-fn print_mem(mem: &mut Memory, metas: &[Meta]) -> Result<(), terl::Error> {
-    for arg in metas.iter() {}
+fn print_mem(_mem: &mut Memory, metas: &[Meta]) -> Result<(), terl::Error> {
+    for arg in metas.iter() {
+        let val = arg.val.map(|v| _mem.read(v));
+        println!("{}: {:?}", arg.id, val);
+    }
     Ok(())
 }
 
