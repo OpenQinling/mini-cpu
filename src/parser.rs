@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use terl::{mapper, ParseUnit, Parser, ResultMapperExt, Span, WithSpan, WithSpanExt};
+use terl::{mapper, MakeError, ParseUnit, Parser, ResultMapperExt, Span, WithSpan};
 
 #[derive(Debug)]
 struct SkipSpace;
 
 impl terl::ParseUnit<char> for SkipSpace {
-    type Target = SkipSpace;
+    type Result = SkipSpace;
 
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
         while p
             .next_if(|c| c.is_ascii_whitespace() && *c != '\n')
             .is_some()
@@ -36,9 +36,9 @@ impl terl::ReverseParseUnit<char> for Equal {
 struct Comment;
 
 impl terl::ParseUnit<char> for Comment {
-    type Target = bool;
+    type Result = bool;
 
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
         if p.next_if(|c| *c == ';').is_none() {
             p.unmatch("expect ';'")?;
         }
@@ -72,51 +72,45 @@ impl terl::ReverseParseUnit<char> for Eol {
     }
 }
 
-#[derive(Debug)]
-struct Tab;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Ident {
+    literal: Arc<str>,
+    buf_name: Arc<str>,
+    location: Span,
+}
 
-impl terl::ReverseParseUnit<char> for Tab {
-    type Left = ();
+impl Ident {
+    pub fn literal(&self) -> &Arc<str> {
+        &self.literal
+    }
 
-    fn reverse_parse(&self, p: &mut Parser<char>) -> terl::Result<Self::Left, terl::ParseError> {
-        while let Some(next) = p.next() {
-            match *next {
-                '\t' => return Ok(()),
-                _ if next.is_whitespace() => continue,
-                _ => p.unmatch("expect TAB")?,
-            }
-        }
-        p.unmatch("expect TAB")
+    pub fn path(&self) -> &Arc<str> {
+        &self.buf_name
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Ident(pub Arc<String>, Span);
-
-impl WithSpan for Ident {
+impl terl::WithSpan for Ident {
     fn get_span(&self) -> Span {
-        self.1
+        self.location
+    }
+}
+
+impl terl::WithBufName for Ident {
+    fn buf_name(&self) -> &Arc<str> {
+        &self.buf_name
     }
 }
 
 impl core::fmt::Display for Ident {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl core::ops::Deref for Ident {
-    type Target = Arc<String>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+        write!(f, "{}", self.literal())
     }
 }
 
 impl terl::ParseUnit<char> for Ident {
-    type Target = Self;
+    type Result = Self;
 
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
         _ = SkipSpace::parse(p);
         p.start_taking();
         let mut ident = String::new();
@@ -128,7 +122,11 @@ impl terl::ParseUnit<char> for Ident {
             p.unmatch("no more ident")?;
         }
 
-        Ok(Ident(ident.into(), p.get_span()))
+        Ok(Ident {
+            literal: ident.into_boxed_str().into(),
+            buf_name: p.buffer().buf_name().clone(),
+            location: p.get_span(),
+        })
     }
 }
 
@@ -139,9 +137,9 @@ pub struct Define {
 }
 
 impl terl::ParseUnit<char> for Define {
-    type Target = Self;
+    type Result = Self;
 
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
         let name = Ident::parse(p)?;
         p.r#match(Equal)?;
         let value = Ident::parse(p)?;
@@ -153,9 +151,9 @@ impl terl::ParseUnit<char> for Define {
 struct Args;
 
 impl terl::ParseUnit<char> for Args {
-    type Target = Vec<Ident>;
+    type Result = Vec<Ident>;
 
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
         let mut args = Vec::new();
         while let Some(ident) = Ident::parse(p).apply(mapper::Try)? {
             args.push(ident);
@@ -165,42 +163,114 @@ impl terl::ParseUnit<char> for Args {
 }
 
 #[derive(Debug)]
-struct Commands;
+struct Tab;
 
-impl terl::ParseUnit<char> for Commands {
-    type Target = Vec<Command>;
+impl terl::ParseUnit<char> for Tab {
+    type Result = ();
 
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
-        let once = |p: &mut Parser<char>| {
-            p.r#match(Tab)?;
-            Command::parse(p)
-        };
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
+        let unmatch = "expect one of `\t` or `    `";
+        terl::Try::<Tab, char>::new(p)
+            .or_try(|p| {
+                if p.next().is_some_and(|c| *c == '\t') {
+                    Ok(())
+                } else {
+                    p.unmatch(unmatch)
+                }
+            })
+            .or_try(|p| {
+                let take_white_space = || p.next_if(|c| c.is_whitespace()).copied();
+                if core::iter::from_fn(take_white_space).take(4).count() == 4 {
+                    Ok(())
+                } else {
+                    p.unmatch(unmatch)
+                }
+            })
+            .finish()
+    }
+}
 
-        let mut commands = Vec::new();
-        while let Some(command) = p.once(once).apply(mapper::Try)? {
-            commands.push(command);
+impl terl::ReverseParseUnit<char> for Tab {
+    type Left = ();
 
-            if p.r#match(Eol).apply(mapper::MustMatch)? {
-                return Ok(commands);
-            }
-        }
-        Ok(commands)
+    fn reverse_parse(&self, p: &mut Parser<char>) -> terl::Result<Self::Left, terl::ParseError> {
+        p.parse::<Self>().map(|_| ())
     }
 }
 
 #[derive(Debug)]
-pub struct Command {
+pub struct Calling {
     pub called: Ident,
     pub args: Vec<Ident>,
 }
 
-impl terl::ParseUnit<char> for Command {
-    type Target = Self;
+impl terl::ParseUnit<char> for Calling {
+    type Result = Self;
 
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
         let called = Ident::parse(p)?;
         let args = Args::parse(p)?;
-        Ok(Command { called, args })
+        Ok(Calling { called, args })
+    }
+}
+
+#[derive(Debug)]
+pub struct Macro {
+    pub called: Ident,
+    pub args: Vec<Ident>,
+}
+
+impl terl::ParseUnit<char> for Macro {
+    type Result = Macro;
+
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
+        if p.next_if(|c| *c == '#').is_none() {
+            return p.unmatch("expect '#'");
+        }
+        let called = Ident::parse(p)?;
+        let args = Args::parse(p)?;
+        Ok(Macro { called, args })
+    }
+}
+
+#[derive(Debug)]
+pub enum Stmt {
+    Calling(Calling),
+    Macro(Macro),
+}
+
+impl terl::ParseUnit<char> for Stmt {
+    type Result = Self;
+
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
+        terl::Try::<Stmt, char>::new(p)
+            .or_try(|p| p.parse::<Calling>().map(Self::Calling))
+            .or_try(|p| p.parse::<Macro>().map(Self::Macro))
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+struct Stmts;
+
+impl terl::ParseUnit<char> for Stmts {
+    type Result = Vec<Stmt>;
+
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
+        let once = |p: &mut Parser<char>| {
+            p.r#match(Tab)?;
+            Stmt::parse(p)
+        };
+
+        let mut stmts = Vec::new();
+        while let Some(stmt) = p.once(once).apply(mapper::Try)? {
+            stmts.push(stmt);
+
+            if p.r#match(Eol).apply(mapper::MustMatch)? {
+                return Ok(stmts);
+            }
+        }
+        Ok(stmts)
     }
 }
 
@@ -208,68 +278,49 @@ impl terl::ParseUnit<char> for Command {
 pub struct Function {
     pub name: Ident,
     pub args: Vec<Ident>,
-    pub body: Vec<Command>,
-}
-
-#[derive(Debug)]
-pub struct MacroCall {
-    pub called: Ident,
-    pub args: Vec<Ident>,
-}
-
-impl terl::ParseUnit<char> for MacroCall {
-    type Target = MacroCall;
-
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
-        if p.next_if(|c| *c == '#').is_none() {
-            return p.unmatch("expect '#'");
-        }
-        let called = Ident::parse(p)?;
-        let args = Args::parse(p)?;
-        Ok(MacroCall { called, args })
-    }
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug)]
 pub enum Item {
     Define(Define),
     Function(Function),
-    Command(Command),
-    MacroCall(MacroCall),
+    Calling(Calling),
+    Macro(Macro),
 }
 
 impl terl::ParseUnit<char> for Item {
-    type Target = Self;
+    type Result = Self;
 
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
         terl::Try::<Item, char>::new(p)
-            .or_try::<Item, _>(|p| {
+            .or_try(|p| {
                 let define = Define::parse(p).map(Item::Define)?;
                 p.r#match(Eol).apply(mapper::MustMatch)?;
                 Ok(define)
             })
-            .or_try::<Item, _>(|p| {
-                let macro_ = MacroCall::parse(p).map(Item::MacroCall)?;
+            .or_try(|p| {
+                let macro_ = Macro::parse(p).map(Item::Macro)?;
                 p.r#match(Eol).apply(mapper::MustMatch)?;
                 Ok(macro_)
             })
-            .or_try::<Item, _>(|p| {
+            .or_try(|p| {
                 let name = Ident::parse(p)?;
                 let args = Args::parse(p)?;
                 terl::Try::<Item, char>::new(p)
-                    .or_try::<Item, _>(|p| {
+                    .or_try(|p| {
                         p.r#match(Equal)?;
                         p.r#match(Eol).apply(mapper::MustMatch)?;
-                        let commands = Commands::parse(p)?;
+                        let commands = Stmts::parse(p)?;
                         Ok(Item::Function(Function {
                             name: name.clone(),
                             args: args.clone(),
                             body: commands,
                         }))
                     })
-                    .or_try::<Item, _>(|p| {
+                    .or_try(|p| {
                         p.r#match(Eol).apply(mapper::MustMatch)?;
-                        Ok(Item::Command(Command { called: name, args }))
+                        Ok(Item::Calling(Calling { called: name, args }))
                     })
                     .or_error("invalid syntax")
                     .finish()
@@ -283,9 +334,9 @@ impl terl::ParseUnit<char> for Item {
 pub struct Items;
 
 impl terl::ParseUnit<char> for Items {
-    type Target = Vec<Item>;
+    type Result = Vec<Item>;
 
-    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Target, terl::ParseError> {
+    fn parse(p: &mut Parser<char>) -> terl::Result<Self::Result, terl::ParseError> {
         let mut items = Vec::new();
 
         while p.peek().is_some() {

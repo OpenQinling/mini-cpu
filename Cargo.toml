@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-smallvec = "1.13.2"
-terl = { version = "0.0.3", features = ["parser_calling_tree"] }
+smallvec = "1.13"
+terl = { git = "https://github.com/OpenQinling/terl.git", features = [
+    "parser_calling_tree",
+] }

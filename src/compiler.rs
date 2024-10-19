@@ -1,28 +1,28 @@
-use std::{collections::HashMap, ops::Deref, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
-use terl::{Span, WithSpan};
+use terl::{AsBuffer, Error, FileBuffer, MakeError, WithBufName, WithSpan};
 
 use crate::{
     macros,
-    parser::{self, Ident},
+    parser::{self, Ident, Stmt},
 };
 
 #[derive(Debug)]
 struct Function {
-    at: Span,
+    name: Ident,
     args: Vec<Ident>,
-    body: Vec<parser::Command>,
+    body: Vec<Stmt>,
 }
 
 #[derive(Debug)]
 struct MacroCall {
-    called: macros::Macro,
+    called: macros::VirtualCall,
     args: Vec<macros::Meta>,
 }
 
 impl MacroCall {
-    fn call(&self, memory: &mut crate::Memory) -> Result<(), terl::Error> {
-        self.called.call(memory, &self.args)
+    fn call(&self, memory: &mut crate::Memory) -> Result<(), Error> {
+        (self.called)(memory, &self.args)
     }
 }
 
@@ -47,108 +47,135 @@ impl From<MacroCall> for Command {
 #[derive(Debug, Default)]
 pub struct Compiler {
     // for defines
-    defines: HashMap<Arc<String>, crate::Value>,
+    defines: HashMap<Arc<str>, crate::Value>,
     // for function
-    args: HashMap<Arc<String>, crate::Value>,
-    functions: HashMap<Arc<String>, Arc<Function>>,
+    args: HashMap<Arc<str>, crate::Value>,
+    functions: HashMap<Arc<str>, Arc<Function>>,
+
+    files: HashMap<Arc<str>, Arc<FileBuffer>>,
 
     commands: Vec<Command>,
 }
 
 impl Compiler {
-    pub fn compile_define(&mut self, define: parser::Define) -> Result<(), terl::Error> {
-        let value = self.parse_value(&define.value)?;
-        self.defines.insert(define.name.0, value);
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn compile_file(&mut self, buffer: Arc<FileBuffer>) -> Result<(), Error> {
+        self.files
+            .insert(buffer.buf_name().to_owned(), buffer.clone());
+        let mut parser = terl::Parser::new(buffer.clone());
+
+        let items = parser.parse::<parser::Items>().map_err(|e| {
+            let msg = format!("faild to compile file {}", buffer.buf_name());
+            let mut error = Error::from(terl::Message::text(msg, buffer.buf_name().to_owned()));
+            error.extend(e.error().into_mesages());
+            error
+        })?;
+
+        for item in items {
+            self.compile_item(item)?;
+        }
+
         Ok(())
     }
 
-    pub fn compile_function(&mut self, function: parser::Function) -> Result<(), terl::Error> {
-        if let Some((.., exist)) = self.functions.get_key_value(function.name.deref()) {
-            let message = exist.at.make_message("function already exists");
+    pub fn compile_define(&mut self, define: parser::Define) -> Result<(), Error> {
+        let value = self.redirect(&define.value)?;
+        self.defines.insert(define.name.literal().clone(), value);
+        Ok(())
+    }
+
+    pub fn compile_function(&mut self, function: parser::Function) -> Result<(), Error> {
+        if let Some((.., exist)) = self.functions.get_key_value(function.name.literal()) {
+            let message = exist.name.make_message("function already exists");
             let err = function.name.make_error("function already exists");
             return Err(err.append(message));
         }
 
-        let at = function.name.get_span();
+        let name = function.name;
         let args = function.args;
         let body = function.body;
-        let name = function.name.0;
 
-        self.functions
-            .insert(name, Arc::new(Function { at, args, body }));
+        self.functions.insert(
+            name.literal().to_owned(),
+            Arc::new(Function { name, args, body }),
+        );
 
         Ok(())
     }
 
-    pub fn parse_value<'a>(&'a self, value: &'a Ident) -> Result<crate::Value, terl::Error> {
+    pub fn redirect<'a>(&'a self, value: &'a Ident) -> Result<crate::Value, Error> {
         self.args
-            .get(value.deref())
-            .or_else(|| self.defines.get(value.deref()))
+            .get(value.literal())
+            .or_else(|| self.defines.get(value.literal()))
             .copied()
             .map(Ok)
-            .unwrap_or_else(|| value.parse::<crate::Value>())
+            .unwrap_or_else(|| value.literal().parse::<crate::Value>())
             .map_err(|e| {
                 let reason = format!("{}: {value}", e);
                 value.make_error(reason)
             })
     }
 
-    pub fn compile_command(&mut self, command: &parser::Command) -> Result<(), terl::Error> {
-        let called_span = command.called.get_span();
-        let args_span = command
+    pub fn compile_calling(&mut self, calling: &parser::Calling) -> Result<(), Error> {
+        let buf_name = calling.called.buf_name();
+        let called_span = calling.called.get_span();
+        let args_span = calling
             .args
             .iter()
             .map(WithSpan::get_span)
             .reduce(|l, r| l + r)
             .unwrap_or(called_span);
 
-        match command.called.as_str() {
+        match calling.called.literal().as_str() {
             builtin if builtin.parse::<crate::Op>().is_ok() => {
-                if command.args.len() != 2 {
-                    return Err(
-                        args_span.make_error(format!("{} command requires 2 arguments", builtin))
-                    );
+                if calling.args.len() != 2 {
+                    let reason = format!("{} call requires 2 arguments", builtin);
+                    return Err(Error::new(args_span, buf_name.to_owned(), reason));
                 }
-                let a = self.parse_value(&command.args[0])?;
-                let b = self.parse_value(&command.args[1])?;
+                let a = self.redirect(&calling.args[0])?;
+                let b = self.redirect(&calling.args[1])?;
                 self.commands
                     .push(crate::Command::new(builtin.parse().unwrap(), a, b).into());
             }
             _custom => {
-                let fn_called = &command.called;
-                if let Some(function) = self.functions.get(command.called.deref()).cloned() {
-                    if function.args.len() != command.args.len() {
+                let fn_called = &calling.called;
+                if let Some(function) = self.functions.get(calling.called.literal()).cloned() {
+                    if function.args.len() != calling.args.len() {
                         let reason = format!(
                             "function {} requires {} arguments",
-                            fn_called.as_str(),
+                            fn_called.literal(),
                             function.args.len()
                         );
-                        return Err(args_span.make_error(reason));
+                        return Err(Error::new(args_span, buf_name.to_owned(), reason));
                     }
 
-                    let mut conflict = HashMap::new();
+                    let mut conflicts = HashMap::new();
 
-                    for (arg, value) in function.args.iter().zip(command.args.iter()) {
-                        let value = self.parse_value(value).to_owned()?;
-                        if let Some(conf) = self.args.insert(arg.deref().clone(), value) {
-                            conflict.insert(arg.deref().clone(), conf);
+                    for (arg, literal) in function.args.iter().zip(calling.args.iter()) {
+                        let arg = arg.literal();
+                        let value = self.redirect(literal)?;
+                        if let Some(conflict) = self.args.insert(arg.clone(), value) {
+                            conflicts.insert(arg.clone(), conflict);
                         }
                     }
 
-                    for command in &function.body {
-                        self.compile_command(command)?;
+                    for stmt in &function.body {
+                        self.compile_stmt(stmt)?;
                     }
 
                     for arg in &function.args {
-                        self.args.remove(arg.deref());
+                        self.args.remove(arg.literal());
                     }
 
-                    for (arg, value) in conflict {
+                    for (arg, value) in conflicts {
                         self.args.insert(arg, value);
                     }
                 } else {
-                    let undefined = format!("undefined function {}", fn_called.as_str());
-                    return Err(fn_called.make_error(undefined));
+                    let undefined = format!("undefined function {}", fn_called.literal());
+                    return Err(Error::new(args_span, buf_name.to_owned(), undefined));
                 }
             }
         }
@@ -156,38 +183,66 @@ impl Compiler {
         Ok(())
     }
 
-    pub fn compile_macro_call(&mut self, macro_call: parser::MacroCall) -> Result<(), terl::Error> {
-        let Some(macro_) = macros::MACROS.get(macro_call.called.as_str()).copied() else {
-            let reason = format!("undefined macro {}", macro_call.called);
-            return Err(macro_call.called.make_error(reason));
+    pub fn compile_macro(&mut self, r#macro: &parser::Macro) -> Result<(), Error> {
+        let Some(macro_) = macros::MACROS
+            .get(r#macro.called.literal().as_str())
+            .copied()
+        else {
+            let reason = format!("undefined macro {}", r#macro.called);
+            return Err(r#macro.called.make_error(reason));
         };
 
-        let metas = macro_call
-            .args
-            .iter()
-            .map(|arg| macros::Meta {
-                id: arg.to_owned(),
-                val: self.parse_value(arg).ok(),
-            })
-            .collect();
-        let call = MacroCall {
-            called: macro_,
-            args: metas,
-        };
+        match macro_ {
+            macros::Macro::Preprocess(preprocess) => preprocess(self, &r#macro.args),
+            macros::Macro::Fn(vf) => {
+                let make_meta = |arg: &Ident| {
+                    let val = self.redirect(arg).ok();
+                    let id = arg.to_owned();
+                    macros::Meta { id, val }
+                };
+                let metas = r#macro.args.iter().map(make_meta).collect();
+                let call = MacroCall {
+                    called: vf,
+                    args: metas,
+                };
 
-        self.commands.push(call.into());
+                self.commands.push(call.into());
 
-        Ok(())
+                Ok(())
+            }
+        }
     }
 
-    pub fn compile_item(&mut self, item: parser::Item) -> Result<(), terl::Error> {
+    pub fn compile_stmt(&mut self, stmt: &parser::Stmt) -> Result<(), Error> {
+        match stmt {
+            Stmt::Calling(calling) => self.compile_calling(calling),
+            Stmt::Macro(r#macro) => self.compile_macro(r#macro),
+        }
+    }
+
+    pub fn compile_item(&mut self, item: parser::Item) -> Result<(), Error> {
         match item {
             parser::Item::Define(define) => self.compile_define(define)?,
             parser::Item::Function(function) => self.compile_function(function)?,
-            parser::Item::Command(command) => self.compile_command(&command)?,
-            parser::Item::MacroCall(macto_call) => self.compile_macro_call(macto_call)?,
+            parser::Item::Calling(calling) => self.compile_calling(&calling)?,
+            parser::Item::Macro(r#macro) => self.compile_macro(&r#macro)?,
         }
         Ok(())
+    }
+
+    pub fn handle_error(&self, error: &Error) -> Result<String, String> {
+        let mut output = String::new();
+        for message in error.messages() {
+            let buf_name = message.buf_name();
+            let buffer = self
+                .files
+                .get(buf_name)
+                .ok_or_else(|| format!("buffer not found: {}", buf_name))?;
+            <char as terl::Source>::handle_message(buffer.as_ref().as_ref(), &mut output, message)
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(output)
     }
 
     pub fn commands(&self) -> impl Iterator<Item = &crate::Command> {

@@ -1,11 +1,13 @@
-mod compiler;
-mod macros;
-mod parser;
+#![feature(str_as_str)]
+pub mod compiler;
+pub mod macros;
+pub mod parser;
 
 use std::{
     num::ParseIntError,
     ops::{Deref, DerefMut},
     str::FromStr,
+    sync::Arc,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -108,7 +110,7 @@ impl From<Op> for u8 {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Command {
+pub struct Command {
     op: Op,
     a: Value,
     b: Value,
@@ -163,7 +165,7 @@ where
     }
 }
 
-struct Memory<'m> {
+pub struct Memory<'m> {
     memory: &'m mut [u8],
 }
 
@@ -214,7 +216,7 @@ impl DerefMut for Memory<'_> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Value(u16);
+pub struct Value(u16);
 
 impl core::fmt::Display for Value {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -276,47 +278,15 @@ fn main() {
     let mut memory = Memory::new(&mut memory);
 
     let src = std::fs::read_to_string("code.mc").unwrap();
-    let buffer = terl::Buffer::new("code.mc".to_string(), src.chars().collect());
-    let mut parser = terl::Parser::new(buffer);
-    let items = parser.parse::<parser::Items>();
+    let buffer = terl::FileBuffer::new("code.mc".into(), src.chars().collect());
+    let buffer = Arc::new(buffer);
 
-    let calling_tree = parser.calling_tree().to_string();
-    let buffer = parser.take_buffer();
-
-    let items = items
-        .inspect_err(|_| println!("{calling_tree}"))
-        .inspect_err(|e| println!("{:?}", e))
-        .map_err(|e| <char as terl::Source>::handle_error(&buffer, e.error()))
-        .map_err(|e| println!("{}", e))
+    let mut compiler = compiler::Compiler::new();
+    compiler
+        .compile_file(buffer.clone())
+        .map_err(|e| compiler.handle_error(&e).unwrap())
+        .map_err(|e| println!("{e}"))
         .unwrap();
-
-    dbg!(&items);
-
-    let mut compiler = compiler::Compiler::default();
-    for item in items {
-        compiler
-            .compile_item(item)
-            .inspect_err(|e| println!("{e:?}"))
-            .map_err(|e| <char as terl::Source>::handle_error(&buffer, e))
-            .unwrap();
-    }
-
-    // let pc = Value::new(0x0000);
-    // let pc_val = Value::new(0xf000);
-    // memory.write(pc, pc_val);
-    // compiler.commands().encode(&mut memory[*pc_val as usize..]);
-
-    // // normal mode: real
-    // loop {
-    //     if memory.eval(pc).is_err() {
-    //         println!("aborted");
-    //         break;
-    //     }
-    //     println!("pc: {}", memory.read(pc).0);
-    //     if let Ok(next) = memory.read(pc).next_command() {
-    //         memory.write(pc, next);
-    //     }
-    // }
 
     compiler.run(Value::new(0xf000), &mut memory);
 }

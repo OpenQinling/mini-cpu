@@ -1,6 +1,11 @@
-use std::{collections::HashMap, sync::LazyLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+};
 
-use crate::{parser::Ident, Memory, Value};
+use terl::{Error, FileBuffer, MakeError};
+
+use crate::{compiler::Compiler, parser::Ident, Memory, Value};
 
 #[derive(Debug)]
 pub struct Meta {
@@ -8,16 +13,18 @@ pub struct Meta {
     pub val: Option<Value>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Macro(fn(mem: &mut Memory, &[Meta]) -> Result<(), terl::Error>);
+pub type VirtualCall = fn(mem: &mut Memory, metas: &[Meta]) -> Result<(), Error>;
+pub type Preprocess = fn(c: &mut Compiler, args: &[Ident]) -> Result<(), Error>;
 
-impl Macro {
-    pub fn call(&self, mem: &mut Memory, metas: &[Meta]) -> Result<(), terl::Error> {
-        self.0(mem, metas)
-    }
+#[derive(Debug, Clone, Copy)]
+pub enum Macro {
+    Fn(VirtualCall),
+    Preprocess(Preprocess),
 }
 
-fn print_mem(_mem: &mut Memory, metas: &[Meta]) -> Result<(), terl::Error> {
+impl Macro {}
+
+fn print_mem(_mem: &mut Memory, metas: &[Meta]) -> Result<(), Error> {
     for arg in metas.iter() {
         let val = arg.val.map(|v| _mem.read(v));
         println!("{}: {:?}", arg.id, val);
@@ -25,5 +32,24 @@ fn print_mem(_mem: &mut Memory, metas: &[Meta]) -> Result<(), terl::Error> {
     Ok(())
 }
 
-pub static MACROS: LazyLock<HashMap<&'static str, Macro>> =
-    LazyLock::new(|| [("print_mem", Macro(print_mem))].into());
+fn include(c: &mut Compiler, args: &[Ident]) -> Result<(), Error> {
+    for file_name in args {
+        let source = std::fs::read_to_string(file_name.literal().as_str()).map_err(|e| {
+            let reason = format!("failed to read file `{}`: {}", file_name.literal(), e);
+            file_name.make_error(reason)
+        })?;
+        let file_buffer = Arc::new(FileBuffer::new(
+            file_name.literal().to_owned(),
+            source.chars().collect(),
+        ));
+        c.compile_file(file_buffer)?;
+    }
+    Ok(())
+}
+
+pub static MACROS: LazyLock<HashMap<&'static str, Macro>> = LazyLock::new(|| {
+    HashMap::from([
+        ("print_mem", Macro::Fn(print_mem)),
+        ("include", Macro::Preprocess(include)),
+    ])
+});
