@@ -67,12 +67,13 @@ impl Compiler {
             .insert(buffer.buf_name().to_owned(), buffer.clone());
         let mut parser = terl::Parser::new(buffer.clone());
 
-        let items = parser.parse::<parser::Items>().map_err(|e| {
+        let items = parser::parse_items(&mut parser).map_err(|e| {
             let msg = format!("faild to compile file {}", buffer.buf_name());
             let mut error = Error::from(terl::Message::text(msg, buffer.buf_name().to_owned()));
             error.extend(e.error().into_mesages());
             error
         })?;
+        dbg!(&items);
 
         for item in items {
             self.compile_item(item)?;
@@ -174,8 +175,8 @@ impl Compiler {
                         self.args.insert(arg, value);
                     }
                 } else {
-                    let undefined = format!("undefined function {}", fn_called.literal());
-                    return Err(Error::new(args_span, buf_name.to_owned(), undefined));
+                    let reason = format!("undefinded function {}", fn_called.literal());
+                    return Err(Error::new(args_span, buf_name.to_owned(), reason));
                 }
             }
         }
@@ -188,7 +189,7 @@ impl Compiler {
             .get(r#macro.called.literal().as_str())
             .copied()
         else {
-            let reason = format!("undefined macro {}", r#macro.called);
+            let reason = format!("undefinded macro {}", r#macro.called);
             return Err(r#macro.called.make_error(reason));
         };
 

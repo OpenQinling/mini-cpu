@@ -24,10 +24,10 @@ pub enum Macro {
 
 impl Macro {}
 
-fn print_mem(_mem: &mut Memory, metas: &[Meta]) -> Result<(), Error> {
+fn print_mem(mem: &mut Memory, metas: &[Meta]) -> Result<(), Error> {
     for arg in metas.iter() {
-        let val = arg.val.map(|v| _mem.read(v));
-        println!("{}: {:?}", arg.id, val);
+        let val = arg.val.map(|v| mem.read(v));
+        println!("print_mem: {} -> {:?}", arg.id, val);
     }
     Ok(())
 }

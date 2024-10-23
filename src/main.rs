@@ -12,10 +12,10 @@ use std::{
 
 #[derive(Debug, Clone, Copy)]
 enum Op {
-    Unknow1,
+    Neq,
     Sub,
     Set,
-    Unknow2,
+    Shr,
     Lod,
     Str,
 }
@@ -23,9 +23,12 @@ enum Op {
 impl Op {
     fn execute(&self, mem: &mut Memory, a: Value, b: Value) {
         match self {
-            // *a += *b
-            Op::Unknow1 => {
-                unreachable!("Unknow1");
+            // *a !== *b
+            Op::Neq => {
+                let a = mem.read(a);
+                let b = mem.read(b);
+                let neq = a != b;
+                mem.write(a, (neq as u16).into());
             }
             // *a -= *b
             Op::Sub => {
@@ -38,9 +41,11 @@ impl Op {
                 mem.write(a, b);
             }
 
-            // *b = *a
-            Op::Unknow2 => {
-                unreachable!()
+            // *a >>= *b
+            Op::Shr => {
+                let tmp = mem.read(a);
+                let (result, _) = tmp.0.overflowing_shr(mem.read(b).0 as u32);
+                mem.write(a, result.into());
             }
             // *a = **b
             Op::Lod => {
@@ -69,10 +74,10 @@ impl FromStr for Op {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            // "Unknow1" => Ok(Op::Unknow1),
+            "NEQ" => Ok(Op::Neq),
             "SUB" => Ok(Op::Sub),
             "SET" => Ok(Op::Set),
-            // "Unknow2" => Ok(Op::Unknow2),
+            "SHR" => Ok(Op::Shr),
             "LOD" => Ok(Op::Lod),
             "STR" => Ok(Op::Str),
             _ => Err(InvalidOp),
@@ -85,10 +90,10 @@ impl TryFrom<u8> for Op {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            1 => Ok(Op::Unknow1),
+            1 => Ok(Op::Neq),
             2 => Ok(Op::Sub),
             3 => Ok(Op::Set),
-            4 => Ok(Op::Unknow2),
+            4 => Ok(Op::Shr),
             5 => Ok(Op::Lod),
             6 => Ok(Op::Str),
             _ => Err(InvalidOp),
@@ -99,10 +104,10 @@ impl TryFrom<u8> for Op {
 impl From<Op> for u8 {
     fn from(value: Op) -> Self {
         match value {
-            Op::Unknow1 => 1,
+            Op::Neq => 1,
             Op::Sub => 2,
             Op::Set => 3,
-            Op::Unknow2 => 4,
+            Op::Shr => 4,
             Op::Lod => 5,
             Op::Str => 6,
         }
